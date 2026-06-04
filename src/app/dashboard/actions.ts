@@ -10,6 +10,15 @@ import {
 import { hasSupabaseEnv } from "@/lib/supabase/env";
 import { createClient } from "@/lib/supabase/server";
 import { canUseStaffRole, isStaffLevelRole } from "@/lib/user-rules";
+import {
+  addStaffNoteAction as addStaffNoteActionExtra,
+  cancelBookingAction as cancelBookingActionExtra,
+  reviewBookingAction as reviewBookingActionExtra,
+  saveEquipmentCategoryAction as saveEquipmentCategoryActionExtra,
+  saveEquipmentItemAction as saveEquipmentItemActionExtra,
+  saveRoomAction as saveRoomActionExtra,
+  updateBookingAction as updateBookingActionExtra
+} from "./action-extras";
 import type {
   BookingEquipmentStatus,
   BookingStatus,
@@ -27,12 +36,6 @@ const ACTIVE_BOOKING_STATUSES: BookingStatus[] = [
   "pending_approval",
   "approved"
 ];
-const ACTIVE_EQUIPMENT_STATUSES: BookingEquipmentStatus[] = [
-  "requested",
-  "approved",
-  "amended"
-];
-const STAFF_ROLES: UserRole[] = ["staff", "admin"];
 const EQUIPMENT_UNAVAILABLE_MESSAGE =
   "Some requested equipment is unavailable at this time. Please choose alternative equipment or contact a member of staff.";
 const UUID_PATTERN =
@@ -41,13 +44,6 @@ const UUID_PATTERN =
 type EquipmentRequestInput = {
   equipmentItemId: string;
   quantity: number;
-};
-
-type EquipmentReviewInput = {
-  id: string;
-  staffAdjustedQuantity: number | null;
-  staffNotes: string | null;
-  status: BookingEquipmentStatus;
 };
 
 function getRequiredValue(formData: FormData, key: string) {
@@ -66,18 +62,6 @@ function getOptionalValue(formData: FormData, key: string) {
   return typeof value === "string" && value.trim().length > 0
     ? value.trim()
     : null;
-}
-
-function getOptionalInteger(formData: FormData, key: string) {
-  const value = formData.get(key);
-
-  if (typeof value !== "string" || value.trim().length === 0) {
-    return null;
-  }
-
-  const parsed = Number(value);
-
-  return Number.isInteger(parsed) ? parsed : null;
 }
 
 function parseLocalDateTime(date: string, time: string) {
@@ -622,12 +606,40 @@ export async function saveUserAction(formData: FormData): Promise<ActionResult> 
   return { ok: true, message: "User updated." };
 }
 
-export {
-  addStaffNoteAction,
-  cancelBookingAction,
-  reviewBookingAction,
-  saveEquipmentCategoryAction,
-  saveEquipmentItemAction,
-  saveRoomAction,
-  updateBookingAction
-} from "./action-extras";
+export async function updateBookingAction(
+  formData: FormData
+): Promise<ActionResult> {
+  return updateBookingActionExtra(formData);
+}
+
+export async function cancelBookingAction(bookingId: string): Promise<ActionResult> {
+  return cancelBookingActionExtra(bookingId);
+}
+
+export async function reviewBookingAction(
+  formData: FormData
+): Promise<ActionResult> {
+  return reviewBookingActionExtra(formData);
+}
+
+export async function addStaffNoteAction(
+  formData: FormData
+): Promise<ActionResult> {
+  return addStaffNoteActionExtra(formData);
+}
+
+export async function saveRoomAction(formData: FormData): Promise<ActionResult> {
+  return saveRoomActionExtra(formData);
+}
+
+export async function saveEquipmentCategoryAction(
+  formData: FormData
+): Promise<ActionResult> {
+  return saveEquipmentCategoryActionExtra(formData);
+}
+
+export async function saveEquipmentItemAction(
+  formData: FormData
+): Promise<ActionResult> {
+  return saveEquipmentItemActionExtra(formData);
+}
