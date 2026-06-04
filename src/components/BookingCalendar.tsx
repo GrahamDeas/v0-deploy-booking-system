@@ -3,6 +3,7 @@
 import FullCalendar from "@fullcalendar/react";
 import dayGridPlugin from "@fullcalendar/daygrid";
 import interactionPlugin from "@fullcalendar/interaction";
+import type { DateClickArg } from "@fullcalendar/interaction";
 import listPlugin from "@fullcalendar/list";
 import timeGridPlugin from "@fullcalendar/timegrid";
 import type {
@@ -18,7 +19,6 @@ import {
   CheckCircle2,
   ClipboardList,
   Clock,
-  DoorOpen,
   Edit3,
   FileText,
   Filter,
@@ -28,7 +28,6 @@ import {
   PackageCheck,
   Plus,
   Save,
-  ShieldCheck,
   Trash2,
   UserCog,
   X
@@ -43,7 +42,6 @@ import {
   reviewBookingAction,
   saveEquipmentCategoryAction,
   saveEquipmentItemAction,
-  saveRoomAction,
   saveUserAction,
   updateBookingAction
 } from "@/app/dashboard/actions";
@@ -98,6 +96,7 @@ type BookingFormState = {
 };
 
 type EquipmentQuantityState = Record<string, number>;
+type BookingRequestStep = "schedule" | "details";
 
 type RoomOption = Pick<
   Room,
@@ -517,6 +516,8 @@ export function BookingCalendar({
   const [inventoryCategoryFilter, setInventoryCategoryFilter] = useState("all");
   const [noEquipmentRequired, setNoEquipmentRequired] = useState(false);
   const [calendarTitle, setCalendarTitle] = useState("");
+  const [bookingRequestStep, setBookingRequestStep] =
+    useState<BookingRequestStep>("schedule");
 
   useEffect(() => {
     function applyResponsiveView() {
@@ -748,34 +749,74 @@ export function BookingCalendar({
     setEquipmentQuantities({});
     setEquipmentSearch("");
     setNoEquipmentRequired(false);
+    setBookingRequestStep("schedule");
   }
 
-  function handleDateSelect(selection: DateSelectArg) {
-    const start = selection.start;
-    const end = selection.end > selection.start ? selection.end : new Date(start);
+  function applySelectedBookingWindow({
+    allDay,
+    end,
+    start
+  }: {
+    allDay: boolean;
+    end: Date;
+    start: Date;
+  }) {
+    const selectedStart = new Date(start);
+    const selectedEnd = end > start ? new Date(end) : new Date(start);
 
-    if (selection.allDay) {
-      start.setHours(9, 0, 0, 0);
-      end.setTime(start.getTime());
-      end.setHours(10, 0, 0, 0);
+    if (allDay) {
+      selectedStart.setHours(9, 0, 0, 0);
+      selectedEnd.setTime(selectedStart.getTime());
+      selectedEnd.setHours(10, 0, 0, 0);
     }
 
-    const selectedStartTime = START_TIME_OPTIONS.includes(toTimeInputValue(start))
-      ? toTimeInputValue(start)
+    const selectedStartTime = START_TIME_OPTIONS.includes(
+      toTimeInputValue(selectedStart)
+    )
+      ? toTimeInputValue(selectedStart)
       : "09:00";
     const selectedEndTime =
-      END_TIME_OPTIONS.includes(toTimeInputValue(end)) &&
-      toTimeInputValue(end) > selectedStartTime
-        ? toTimeInputValue(end)
+      END_TIME_OPTIONS.includes(toTimeInputValue(selectedEnd)) &&
+      toTimeInputValue(selectedEnd) > selectedStartTime
+        ? toTimeInputValue(selectedEnd)
         : getNextEndTime(selectedStartTime);
 
     setForm((current) => ({
       ...current,
-      bookingDate: toDateInputValue(start),
+      bookingDate: toDateInputValue(selectedStart),
       endTime: selectedEndTime,
       startTime: selectedStartTime
     }));
+    setBookingRequestStep("schedule");
     setFeedback(null);
+  }
+
+  function handleDateSelect(selection: DateSelectArg) {
+    applySelectedBookingWindow({
+      allDay: selection.allDay,
+      end: selection.end,
+      start: selection.start
+    });
+  }
+
+  function handleDateClick(dateClick: DateClickArg) {
+    if (dateClick.view.type !== "dayGridMonth") {
+      return;
+    }
+
+    const selectedStart = new Date(dateClick.date);
+    selectedStart.setHours(9, 0, 0, 0);
+
+    const selectedEnd = new Date(selectedStart);
+    selectedEnd.setHours(10, 0, 0, 0);
+
+    applySelectedBookingWindow({
+      allDay: false,
+      end: selectedEnd,
+      start: selectedStart
+    });
+
+    calendarRef.current?.getApi().changeView("timeGridDay", dateClick.date);
   }
 
   function handleEventClick(event: EventClickArg) {
@@ -828,7 +869,46 @@ export function BookingCalendar({
       )
     );
     setNoEquipmentRequired(getBookingEquipment(selectedBooking).length === 0);
+    setBookingRequestStep("schedule");
     setFeedback(null);
+  }
+
+  function handleContinueToDetails() {
+    setFeedback(null);
+
+    if (
+      !form.studentName.trim() ||
+      !form.studentEmail.trim() ||
+      !form.courseClass.trim() ||
+      !form.roomId
+    ) {
+      setFeedback({
+        type: "error",
+        text: "Complete the booking request details before continuing."
+      });
+      return;
+    }
+
+    const windowError = isWorkingWindow(
+      form.bookingDate,
+      form.startTime,
+      form.endTime
+    );
+
+    if (windowError) {
+      setFeedback({ type: "error", text: windowError });
+      return;
+    }
+
+    if (hasConflict(bookings, form, editingBookingId)) {
+      setFeedback({
+        type: "error",
+        text: "This room already has a pending or approved booking at that time."
+      });
+      return;
+    }
+
+    setBookingRequestStep("details");
   }
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
@@ -1051,7 +1131,15 @@ export function BookingCalendar({
     selectedBooking.status === "pending_approval";
 
   return (
-    <section className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_390px]">
+    <section
+      className={cn(
+        "grid gap-5",
+        bookingRequestStep === "schedule"
+          ? "xl:grid-cols-[minmax(0,1fr)_390px]"
+          : "xl:grid-cols-1"
+      )}
+    >
+      {bookingRequestStep === "schedule" ? (
       <div className="flex min-w-0 flex-col gap-5">
         <div className="panel min-w-0 p-3 sm:p-4">
           {calendarTitle ? (
@@ -1110,6 +1198,7 @@ export function BookingCalendar({
               canSelectWindow(selection.start, selection.end)
             }
             select={handleDateSelect}
+            dateClick={handleDateClick}
             eventClick={handleEventClick}
           />
         </div>
@@ -1203,10 +1292,10 @@ export function BookingCalendar({
             isSubmitting={isSubmitting}
             setInventoryCategoryFilter={setInventoryCategoryFilter}
             profiles={profiles}
-            rooms={rooms}
           />
         ) : null}
       </div>
+      ) : null}
 
       <aside className="flex min-w-0 flex-col gap-4">
         <form className="panel space-y-4 p-4" onSubmit={handleSubmit}>
@@ -1224,6 +1313,37 @@ export function BookingCalendar({
             </span>
           </div>
 
+          <div className="grid grid-cols-2 gap-2 rounded-lg border border-line bg-slate-50 p-1">
+            <button
+              className={cn(
+                "icon-button border-line",
+                bookingRequestStep === "schedule"
+                  ? "bg-navy text-white"
+                  : "bg-transparent text-slate-600 hover:bg-white"
+              )}
+              type="button"
+              onClick={() => setBookingRequestStep("schedule")}
+            >
+              <CalendarPlus size={16} aria-hidden="true" />
+              Request
+            </button>
+            <button
+              className={cn(
+                "icon-button border-line",
+                bookingRequestStep === "details"
+                  ? "bg-navy text-white"
+                  : "bg-transparent text-slate-600 hover:bg-white"
+              )}
+              type="button"
+              onClick={handleContinueToDetails}
+            >
+              <Mic2 size={16} aria-hidden="true" />
+              Details
+            </button>
+          </div>
+
+          {bookingRequestStep === "schedule" ? (
+            <>
           <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-1">
             <label className="block space-y-2">
               <span className="field-label">Student name</span>
@@ -1332,212 +1452,6 @@ export function BookingCalendar({
             </label>
           </div>
 
-          <label className="block space-y-2">
-            <span className="field-label">Description of planned tasks</span>
-            <textarea
-              className="field-control min-h-28 resize-y"
-              value={form.description}
-              onChange={(event) => updateField("description", event.target.value)}
-              required
-            />
-          </label>
-
-          <label className="block space-y-2">
-            <span className="field-label">Additional notes</span>
-            <textarea
-              className="field-control min-h-20 resize-y"
-              value={form.additionalNotes}
-              onChange={(event) => updateField("additionalNotes", event.target.value)}
-            />
-          </label>
-
-          <section className="space-y-3 rounded-md border border-line bg-slate-50 p-3">
-            <div className="flex items-start justify-between gap-3">
-              <div>
-                <h3 className="flex items-center gap-2 text-sm font-black text-navy">
-                  <Mic2 size={17} aria-hidden="true" />
-                  Equipment Required
-                </h3>
-                <p className="mt-1 text-xs font-semibold text-slate-500">
-                  Select microphones or DI boxes for this booking window.
-                </p>
-              </div>
-              <span className="rounded-md bg-sky/10 p-2 text-sky">
-                <PackageCheck size={18} aria-hidden="true" />
-              </span>
-            </div>
-
-            <label className="flex items-center gap-2 rounded-md border border-line bg-white p-3 text-sm font-semibold text-slate-700">
-              <input
-                className="h-4 w-4 accent-teal"
-                checked={noEquipmentRequired}
-                type="checkbox"
-                onChange={(event) => {
-                  setNoEquipmentRequired(event.target.checked);
-
-                  if (event.target.checked) {
-                    setEquipmentQuantities({});
-                  }
-                }}
-              />
-              No equipment required
-            </label>
-
-            <label className="block space-y-2">
-              <span className="field-label">Search equipment</span>
-              <div className="relative">
-                <Filter
-                  className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400"
-                  size={17}
-                  aria-hidden="true"
-                />
-                <input
-                  className="field-control pl-10"
-                  placeholder="Search by name, e.g. SM57"
-                  type="search"
-                  value={equipmentSearch}
-                  onChange={(event) => {
-                    setEquipmentSearch(event.target.value);
-
-                    if (event.target.value.trim().length > 0) {
-                      setNoEquipmentRequired(false);
-                    }
-                  }}
-                />
-              </div>
-            </label>
-
-            <div className="flex flex-wrap items-center justify-between gap-2 text-xs font-semibold text-slate-500">
-              <span>
-                Showing {visibleEquipmentItemCount} of {equipmentItemCount} equipment
-                items
-              </span>
-              {equipmentSearch ? (
-                <button
-                  className="font-black uppercase text-teal hover:text-navy"
-                  type="button"
-                  onClick={() => setEquipmentSearch("")}
-                >
-                  Clear search
-                </button>
-              ) : null}
-            </div>
-
-            <div className="max-h-[34rem] space-y-3 overflow-y-auto pr-1">
-              {groupedEquipmentItems.map(({ category, items }) => (
-                <div className="space-y-2" key={category.id}>
-                  <h4 className="text-xs font-black uppercase text-blue">
-                    {category.name}
-                  </h4>
-                  <div className="grid gap-2">
-                    {items.map((item) => {
-                      const requestedQuantity = equipmentQuantities[item.id] ?? 0;
-                      const availableQuantity = getAvailableForItem(item);
-                      const isUnavailable =
-                        requestedQuantity > 0 && requestedQuantity > availableQuantity;
-
-                      return (
-                        <div
-                          className={cn(
-                            "rounded-md border bg-white p-3",
-                            isUnavailable ? "border-red-200" : "border-line"
-                          )}
-                          key={item.id}
-                        >
-                          <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-                            <div className="min-w-0">
-                              <p className="text-sm font-black text-ink">
-                                {item.name}
-                              </p>
-                              <p className="mt-1 text-xs font-semibold text-slate-500">
-                                Total {item.total_quantity} • Available now{" "}
-                                {availableQuantity}
-                              </p>
-                              {item.notes ? (
-                                <p className="mt-2 text-xs leading-5 text-slate-600">
-                                  {item.notes}
-                                </p>
-                              ) : null}
-                            </div>
-                            <label className="grid w-full gap-1 sm:w-28">
-                              <span className="field-label">Qty</span>
-                              <input
-                                className="field-control"
-                                disabled={noEquipmentRequired}
-                                max={item.total_quantity}
-                                min={0}
-                                type="number"
-                                value={requestedQuantity}
-                                onChange={(event) =>
-                                  updateEquipmentQuantity(
-                                    item.id,
-                                    Number(event.target.value)
-                                  )
-                                }
-                              />
-                            </label>
-                          </div>
-
-                          {isUnavailable ? (
-                            <p className="mt-2 flex items-center gap-1 text-xs font-bold text-red-700">
-                              <AlertTriangle size={14} aria-hidden="true" />
-                              Not enough available for this time.
-                            </p>
-                          ) : null}
-                        </div>
-                      );
-                    })}
-                  </div>
-                </div>
-              ))}
-
-              {groupedEquipmentItems.length === 0 ? (
-                <p className="rounded-md border border-dashed border-line bg-white p-3 text-sm font-semibold text-slate-500">
-                  {equipmentItemCount === 0
-                    ? "No equipment inventory has loaded. Run the Stage 2 Supabase migration to seed the microphone and DI inventory."
-                    : "No matching equipment."}
-                </p>
-              ) : null}
-            </div>
-          </section>
-
-          <section className="rounded-md border border-line bg-white p-3">
-            <h3 className="text-sm font-black text-navy">Booking summary</h3>
-            <div className="mt-2 space-y-1 text-sm text-slate-700">
-              <p>
-                <span className="font-semibold">Room:</span>{" "}
-                {roomOptions.find((room) => room.id === form.roomId)?.name ??
-                  "Select a room"}
-              </p>
-              <p>
-                <span className="font-semibold">Time:</span>{" "}
-                {formatDisplayDate(form.bookingDate)} {formatTimeOption(form.startTime)}
-                -{formatTimeOption(form.endTime)}
-              </p>
-              <p>
-                <span className="font-semibold">Tasks:</span>{" "}
-                {form.description.trim() || "Description required"}
-              </p>
-              <p>
-                <span className="font-semibold">Equipment:</span>{" "}
-                {noEquipmentRequired || selectedEquipmentRequests.length === 0
-                  ? "No equipment required"
-                  : selectedEquipmentRequests
-                      .map((request) => {
-                        const item = equipmentItemLookup.get(request.equipmentItemId);
-
-                        return `${request.quantity} x ${
-                          item?.name ?? "Equipment"
-                        }`;
-                      })
-                      .join(", ")}
-              </p>
-              <p>
-                <span className="font-semibold">Status:</span> Pending Approval
-              </p>
-            </div>
-          </section>
-
           {feedback ? (
             <p
               className={cn(
@@ -1551,37 +1465,298 @@ export function BookingCalendar({
             </p>
           ) : null}
 
-          <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-1">
-            <button
-              className="icon-button w-full bg-fern text-white hover:bg-fern/90"
-              disabled={isSubmitting || roomOptions.length === 0}
-              type="submit"
-            >
-              {editingBookingId ? (
-                <Save size={18} aria-hidden="true" />
-              ) : (
-                <Plus size={18} aria-hidden="true" />
-              )}
-              {isSubmitting
-                ? "Saving"
-                : editingBookingId
-                  ? "Save request"
-                  : "Submit request"}
-            </button>
+          <button
+            className="icon-button w-full bg-fern text-white hover:bg-fern/90"
+            disabled={isSubmitting || roomOptions.length === 0}
+            type="button"
+            onClick={handleContinueToDetails}
+          >
+            <Mic2 size={18} aria-hidden="true" />
+            Continue to details
+          </button>
+            </>
+          ) : (
+            <>
+              <div className="grid gap-4 xl:grid-cols-[minmax(0,0.9fr)_minmax(360px,1.1fr)] xl:items-start">
+                <div className="space-y-4">
+                  <label className="block space-y-2">
+                    <span className="field-label">Description of planned tasks</span>
+                    <textarea
+                      className="field-control min-h-44 resize-y"
+                      value={form.description}
+                      onChange={(event) =>
+                        updateField("description", event.target.value)
+                      }
+                      required
+                    />
+                  </label>
 
-            {editingBookingId ? (
-              <button
-                className="icon-button w-full border-line bg-white text-slate-700 hover:bg-slate-50"
-                type="button"
-                onClick={resetForm}
-              >
-                <X size={18} aria-hidden="true" />
-                Stop editing
-              </button>
-            ) : null}
-          </div>
+                  <label className="block space-y-2">
+                    <span className="field-label">Additional notes</span>
+                    <textarea
+                      className="field-control min-h-28 resize-y"
+                      value={form.additionalNotes}
+                      onChange={(event) =>
+                        updateField("additionalNotes", event.target.value)
+                      }
+                    />
+                  </label>
+
+                  <section className="rounded-md border border-line bg-white p-3">
+                    <h3 className="text-sm font-black text-navy">
+                      Booking summary
+                    </h3>
+                    <div className="mt-2 space-y-1 text-sm text-slate-700">
+                      <p>
+                        <span className="font-semibold">Room:</span>{" "}
+                        {roomOptions.find((room) => room.id === form.roomId)
+                          ?.name ?? "Select a room"}
+                      </p>
+                      <p>
+                        <span className="font-semibold">Time:</span>{" "}
+                        {formatDisplayDate(form.bookingDate)}{" "}
+                        {formatTimeOption(form.startTime)}-
+                        {formatTimeOption(form.endTime)}
+                      </p>
+                      <p>
+                        <span className="font-semibold">Tasks:</span>{" "}
+                        {form.description.trim() || "Description required"}
+                      </p>
+                      <p>
+                        <span className="font-semibold">Equipment:</span>{" "}
+                        {noEquipmentRequired ||
+                        selectedEquipmentRequests.length === 0
+                          ? "No equipment required"
+                          : selectedEquipmentRequests
+                              .map((request) => {
+                                const item = equipmentItemLookup.get(
+                                  request.equipmentItemId
+                                );
+
+                                return `${request.quantity} x ${
+                                  item?.name ?? "Equipment"
+                                }`;
+                              })
+                              .join(", ")}
+                      </p>
+                      <p>
+                        <span className="font-semibold">Status:</span> Pending
+                        Approval
+                      </p>
+                    </div>
+                  </section>
+
+                  {feedback ? (
+                    <p
+                      className={cn(
+                        "rounded-md border px-3 py-2 text-sm font-semibold",
+                        feedback.type === "ok"
+                          ? "border-emerald-200 bg-emerald-50 text-emerald-700"
+                          : "border-red-200 bg-red-50 text-red-700"
+                      )}
+                    >
+                      {feedback.text}
+                    </p>
+                  ) : null}
+
+                  <div className="grid gap-2 sm:grid-cols-2">
+                    <button
+                      className="icon-button w-full border-line bg-white text-slate-700 hover:bg-slate-50"
+                      type="button"
+                      onClick={() => setBookingRequestStep("schedule")}
+                    >
+                      <CalendarPlus size={18} aria-hidden="true" />
+                      Back to request
+                    </button>
+                    <button
+                      className="icon-button w-full bg-fern text-white hover:bg-fern/90"
+                      disabled={isSubmitting || roomOptions.length === 0}
+                      type="submit"
+                    >
+                      {editingBookingId ? (
+                        <Save size={18} aria-hidden="true" />
+                      ) : (
+                        <Plus size={18} aria-hidden="true" />
+                      )}
+                      {isSubmitting
+                        ? "Saving"
+                        : editingBookingId
+                          ? "Save request"
+                          : "Submit request"}
+                    </button>
+
+                    {editingBookingId ? (
+                      <button
+                        className="icon-button w-full border-line bg-white text-slate-700 hover:bg-slate-50 sm:col-span-2"
+                        type="button"
+                        onClick={resetForm}
+                      >
+                        <X size={18} aria-hidden="true" />
+                        Stop editing
+                      </button>
+                    ) : null}
+                  </div>
+                </div>
+
+                <section className="space-y-3 rounded-md border border-line bg-slate-50 p-3 xl:sticky xl:top-4">
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <h3 className="flex items-center gap-2 text-sm font-black text-navy">
+                        <Mic2 size={17} aria-hidden="true" />
+                        Equipment Required
+                      </h3>
+                      <p className="mt-1 text-xs font-semibold text-slate-500">
+                        Select microphones or DI boxes for this booking window.
+                      </p>
+                    </div>
+                    <span className="rounded-md bg-sky/10 p-2 text-sky">
+                      <PackageCheck size={18} aria-hidden="true" />
+                    </span>
+                  </div>
+
+                  <label className="flex items-center gap-2 rounded-md border border-line bg-white p-3 text-sm font-semibold text-slate-700">
+                    <input
+                      className="h-4 w-4 accent-teal"
+                      checked={noEquipmentRequired}
+                      type="checkbox"
+                      onChange={(event) => {
+                        setNoEquipmentRequired(event.target.checked);
+
+                        if (event.target.checked) {
+                          setEquipmentQuantities({});
+                        }
+                      }}
+                    />
+                    No equipment required
+                  </label>
+
+                  <label className="block space-y-2">
+                    <span className="field-label">Search equipment</span>
+                    <div className="relative">
+                      <Filter
+                        className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400"
+                        size={17}
+                        aria-hidden="true"
+                      />
+                      <input
+                        className="field-control pl-10"
+                        placeholder="Search by name, e.g. SM57"
+                        type="search"
+                        value={equipmentSearch}
+                        onChange={(event) => {
+                          setEquipmentSearch(event.target.value);
+
+                          if (event.target.value.trim().length > 0) {
+                            setNoEquipmentRequired(false);
+                          }
+                        }}
+                      />
+                    </div>
+                  </label>
+
+                  <div className="flex flex-wrap items-center justify-between gap-2 text-xs font-semibold text-slate-500">
+                    <span>
+                      Showing {visibleEquipmentItemCount} of {equipmentItemCount}{" "}
+                      equipment items
+                    </span>
+                    {equipmentSearch ? (
+                      <button
+                        className="font-black uppercase text-teal hover:text-navy"
+                        type="button"
+                        onClick={() => setEquipmentSearch("")}
+                      >
+                        Clear search
+                      </button>
+                    ) : null}
+                  </div>
+
+                  <div className="max-h-[30rem] space-y-3 overflow-y-auto pr-1 xl:max-h-[calc(100vh-19rem)]">
+                    {groupedEquipmentItems.map(({ category, items }) => (
+                      <div className="space-y-2" key={category.id}>
+                        <h4 className="text-xs font-black uppercase text-blue">
+                          {category.name}
+                        </h4>
+                        <div className="grid gap-2">
+                          {items.map((item) => {
+                            const requestedQuantity =
+                              equipmentQuantities[item.id] ?? 0;
+                            const availableQuantity = getAvailableForItem(item);
+                            const isUnavailable =
+                              requestedQuantity > 0 &&
+                              requestedQuantity > availableQuantity;
+
+                            return (
+                              <div
+                                className={cn(
+                                  "rounded-md border bg-white p-3",
+                                  isUnavailable
+                                    ? "border-red-200"
+                                    : "border-line"
+                                )}
+                                key={item.id}
+                              >
+                                <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                                  <div className="min-w-0">
+                                    <p className="text-sm font-black text-ink">
+                                      {item.name}
+                                    </p>
+                                    <p className="mt-1 text-xs font-semibold text-slate-500">
+                                      Total {item.total_quantity} • Available now{" "}
+                                      {availableQuantity}
+                                    </p>
+                                    {item.notes ? (
+                                      <p className="mt-2 text-xs leading-5 text-slate-600">
+                                        {item.notes}
+                                      </p>
+                                    ) : null}
+                                  </div>
+                                  <label className="grid w-full gap-1 sm:w-28">
+                                    <span className="field-label">Qty</span>
+                                    <input
+                                      className="field-control"
+                                      disabled={noEquipmentRequired}
+                                      max={item.total_quantity}
+                                      min={0}
+                                      type="number"
+                                      value={requestedQuantity}
+                                      onChange={(event) =>
+                                        updateEquipmentQuantity(
+                                          item.id,
+                                          Number(event.target.value)
+                                        )
+                                      }
+                                    />
+                                  </label>
+                                </div>
+
+                                {isUnavailable ? (
+                                  <p className="mt-2 flex items-center gap-1 text-xs font-bold text-red-700">
+                                    <AlertTriangle size={14} aria-hidden="true" />
+                                    Not enough available for this time.
+                                  </p>
+                                ) : null}
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    ))}
+
+                    {groupedEquipmentItems.length === 0 ? (
+                      <p className="rounded-md border border-dashed border-line bg-white p-3 text-sm font-semibold text-slate-500">
+                        {equipmentItemCount === 0
+                          ? "No equipment inventory has loaded. Run the Stage 2 Supabase migration to seed the microphone and DI inventory."
+                          : "No matching equipment."}
+                      </p>
+                    ) : null}
+                  </div>
+                </section>
+              </div>
+            </>
+          )}
         </form>
 
+        {bookingRequestStep === "details" ? (
         <section className="panel p-4">
           <div className="mb-4 flex items-center justify-between gap-3">
             <h2 className="text-base font-black text-ink">Selected booking</h2>
@@ -1898,32 +2073,7 @@ export function BookingCalendar({
             </div>
           )}
         </section>
-
-        <section className="panel p-4">
-          <h2 className="mb-3 flex items-center gap-2 text-base font-black text-ink">
-            <DoorOpen size={18} aria-hidden="true" />
-            Rooms
-          </h2>
-          <div className="space-y-2">
-            {roomOptions.map((room) => (
-              <div
-                className="flex items-center justify-between gap-3 rounded-md border border-line bg-white p-3"
-                key={room.id}
-              >
-                <div className="min-w-0">
-                  <p className="truncate text-sm font-bold text-ink">{room.name}</p>
-                  <p className="truncate text-xs font-semibold text-slate-500">
-                    {room.location}
-                  </p>
-                </div>
-                <span
-                  className="h-3 w-3 shrink-0 rounded-full"
-                  style={{ backgroundColor: room.color }}
-                />
-              </div>
-            ))}
-          </div>
-        </section>
+        ) : null}
       </aside>
     </section>
   );
@@ -1936,8 +2086,7 @@ function AdminPanels({
   inventoryCategoryFilter,
   isSubmitting,
   setInventoryCategoryFilter,
-  profiles,
-  rooms
+  profiles
 }: {
   equipmentCategories: EquipmentCategory[];
   equipmentItems: EquipmentItem[];
@@ -1953,7 +2102,6 @@ function AdminPanels({
   isSubmitting: boolean;
   setInventoryCategoryFilter: (value: string) => void;
   profiles: Profile[];
-  rooms: Room[];
 }) {
   const categoryNameById = new Map(
     equipmentCategories.map((category) => [category.id, category.name])
@@ -1967,136 +2115,6 @@ function AdminPanels({
 
   return (
     <section className="grid gap-5 lg:grid-cols-2">
-      <div className="panel p-4">
-        <h2 className="mb-4 flex items-center gap-2 text-base font-black text-ink">
-          <ShieldCheck size={18} aria-hidden="true" />
-          Manage rooms
-        </h2>
-
-        <div className="space-y-3">
-          {rooms.map((room) => (
-            <form
-              className="grid gap-3 rounded-md border border-line bg-white p-3"
-              key={room.id}
-              onSubmit={(event) => handleAdminSubmit(event, saveRoomAction)}
-            >
-              <input name="room_id" type="hidden" value={room.id} />
-              <input
-                className="field-control"
-                defaultValue={room.name}
-                name="name"
-                required
-              />
-              <input
-                className="field-control"
-                defaultValue={room.location}
-                name="location"
-                required
-              />
-              <textarea
-                className="field-control min-h-20 resize-y"
-                defaultValue={room.description ?? ""}
-                name="description"
-              />
-              <div className="grid gap-2 sm:grid-cols-3">
-                <input
-                  className="field-control"
-                  defaultValue={room.capacity}
-                  min={1}
-                  name="capacity"
-                  type="number"
-                />
-                <input
-                  className="field-control"
-                  defaultValue={room.sort_order}
-                  name="sort_order"
-                  type="number"
-                />
-                <input
-                  className="field-control h-11"
-                  defaultValue={room.color}
-                  name="color"
-                  type="color"
-                />
-              </div>
-              <label className="flex items-center gap-2 text-sm font-semibold text-slate-700">
-                <input
-                  className="h-4 w-4 accent-fern"
-                  defaultChecked={room.is_active}
-                  name="is_active"
-                  type="checkbox"
-                />
-                Active
-              </label>
-              <button
-                className="icon-button bg-ink text-white hover:bg-ink/90"
-                disabled={isSubmitting}
-                type="submit"
-              >
-                <Save size={17} aria-hidden="true" />
-                Save room
-              </button>
-            </form>
-          ))}
-
-          <form
-            className="grid gap-3 rounded-md border border-dashed border-line bg-slate-50 p-3"
-            onSubmit={(event) => handleAdminSubmit(event, saveRoomAction)}
-          >
-            <input className="field-control" name="name" placeholder="Room name" required />
-            <input
-              className="field-control"
-              name="location"
-              placeholder="Location"
-              required
-            />
-            <textarea
-              className="field-control min-h-20 resize-y"
-              name="description"
-              placeholder="Description"
-            />
-            <div className="grid gap-2 sm:grid-cols-3">
-              <input
-                className="field-control"
-                defaultValue={4}
-                min={1}
-                name="capacity"
-                type="number"
-              />
-              <input
-                className="field-control"
-                defaultValue={rooms.length + 1}
-                name="sort_order"
-                type="number"
-              />
-              <input
-                className="field-control h-11"
-                defaultValue="#177a68"
-                name="color"
-                type="color"
-              />
-            </div>
-            <label className="flex items-center gap-2 text-sm font-semibold text-slate-700">
-              <input
-                className="h-4 w-4 accent-fern"
-                defaultChecked
-                name="is_active"
-                type="checkbox"
-              />
-              Active
-            </label>
-            <button
-              className="icon-button bg-fern text-white hover:bg-fern/90"
-              disabled={isSubmitting}
-              type="submit"
-            >
-              <Plus size={17} aria-hidden="true" />
-              Add room
-            </button>
-          </form>
-        </div>
-      </div>
-
       <div className="panel p-4">
         <h2 className="mb-4 flex items-center gap-2 text-base font-black text-ink">
           <UserCog size={18} aria-hidden="true" />
