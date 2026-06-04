@@ -4,7 +4,6 @@ import {
   DoorOpen,
   Inbox,
   MapPin,
-  Mic2,
   ShieldCheck,
   Users
 } from "lucide-react";
@@ -205,14 +204,14 @@ export default async function DashboardPage() {
       <div className="mx-auto flex max-w-7xl flex-col gap-5">
         <header className="flex flex-col gap-4 rounded-lg border border-navy/10 bg-white px-4 py-4 shadow-soft lg:flex-row lg:items-center lg:justify-between">
           <div className="flex items-center gap-4">
-            <div className="flex h-16 w-32 shrink-0 items-center justify-center rounded-md bg-white p-2">
+            <div className="flex h-16 w-52 shrink-0 items-center justify-center rounded-md bg-white p-2">
               <Image
                 alt="Fife College"
                 className="h-auto w-full object-contain"
-                height={72}
+                height={340}
                 priority
-                src="/branding/fife-college-logo.svg"
-                width={180}
+                src="/branding/fife-college-logo.png"
+                width={1122}
               />
             </div>
             <div>
@@ -298,22 +297,6 @@ export default async function DashboardPage() {
               </p>
             </div>
           </div>
-        </section>
-
-        <section className="panel flex flex-col gap-3 border-navy/10 bg-navy px-4 py-4 text-white sm:flex-row sm:items-center sm:justify-between">
-          <div>
-            <h2 className="flex items-center gap-2 text-sm font-black uppercase">
-              <Mic2 size={18} aria-hidden="true" />
-              Microphone and DI inventory
-            </h2>
-            <p className="mt-1 text-sm text-white/75">
-              {equipmentItems.length} inventory records loaded for booking
-              requests and staff review.
-            </p>
-          </div>
-          <span className="rounded-md bg-lime px-3 py-1 text-xs font-black uppercase text-navy">
-            Stage 2
-          </span>
         </section>
 
         <BookingCalendar
