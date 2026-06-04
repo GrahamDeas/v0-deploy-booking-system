@@ -25,6 +25,19 @@ const STAFF_BOOKING_NOTIFICATION_RECIPIENTS = [
   "billthaw@fife.ac.uk"
 ] as const;
 
+function getBookingNotificationRecipients() {
+  const configuredRecipients = process.env.BOOKING_NOTIFICATION_RECIPIENTS;
+
+  if (!configuredRecipients) {
+    return [...STAFF_BOOKING_NOTIFICATION_RECIPIENTS];
+  }
+
+  return configuredRecipients
+    .split(",")
+    .map((recipient) => recipient.trim())
+    .filter(Boolean);
+}
+
 function escapeHtml(value: string) {
   return value
     .replaceAll("&", "&amp;")
@@ -108,6 +121,24 @@ export function hasBookingNotificationEmailConfig() {
   return Boolean(process.env.RESEND_API_KEY);
 }
 
+export function explainBookingNotificationError(error: string | undefined) {
+  if (!error) {
+    return "The booking was saved, but the staff notification email could not be sent.";
+  }
+
+  if (
+    error.includes("You can only send testing emails") ||
+    error.includes("verify a domain")
+  ) {
+    return (
+      "The booking was saved, but staff email notifications are blocked in Resend testing mode. " +
+      "Verify a sending domain in Resend, then update BOOKING_NOTIFICATION_FROM to use that domain."
+    );
+  }
+
+  return "The booking was saved, but the staff notification email could not be sent.";
+}
+
 export async function sendBookingRequestNotification(
   input: BookingNotificationInput
 ) {
@@ -121,13 +152,23 @@ export async function sendBookingRequestNotification(
     process.env.BOOKING_NOTIFICATION_FROM ||
     "Studio Booking System <onboarding@resend.dev>";
   const { html, plainText, subject } = buildBookingNotificationEmail(input);
+  const recipients = getBookingNotificationRecipients();
+
+  if (recipients.length === 0) {
+    return {
+      ok: false,
+      skipped: false,
+      error: "No booking notification recipients are configured."
+    };
+  }
+
   const response = await fetch("https://api.resend.com/emails", {
     body: JSON.stringify({
       from,
       html,
       subject,
       text: plainText,
-      to: STAFF_BOOKING_NOTIFICATION_RECIPIENTS
+      to: recipients
     }),
     headers: {
       Authorization: `Bearer ${apiKey}`,
