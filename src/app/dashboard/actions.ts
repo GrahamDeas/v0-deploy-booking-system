@@ -3,8 +3,13 @@
 import { revalidatePath } from "next/cache";
 
 import { COURSE_CLASS_OPTIONS } from "@/lib/booking-options";
+import {
+  hasBookingNotificationEmailConfig,
+  sendBookingRequestNotification
+} from "@/lib/booking-notifications";
 import { hasSupabaseEnv } from "@/lib/supabase/env";
 import { createClient } from "@/lib/supabase/server";
+import { canUseStaffRole, isStaffLevelRole } from "@/lib/user-rules";
 import type {
   BookingEquipmentStatus,
   BookingStatus,
@@ -453,8 +458,9 @@ export async function createBookingAction(
 
   try {
     const values = readBookingForm(formData);
+    const roomName = getOptionalValue(formData, "room_name") ?? values.room_id;
     values.room_id = await resolveRoomId({
-      roomName: getOptionalValue(formData, "room_name"),
+      roomName,
       roomValue: values.room_id,
       supabase
     });
@@ -518,9 +524,68 @@ export async function createBookingAction(
       }
     }
 
+    let notificationMessage =
+      "Booking request submitted for approval. Staff email notifications are not configured yet.";
+    let notificationWarning: string | null = null;
+
+    if (hasBookingNotificationEmailConfig()) {
+      notificationMessage =
+        "Booking request submitted for approval. Staff have been notified by email.";
+      const equipmentNamesById = new Map<string, string>();
+
+      if (equipmentRequests.length > 0) {
+        const { data: equipmentItems, error: equipmentItemsError } = await supabase
+          .from("equipment_items")
+          .select("id,name")
+          .in(
+            "id",
+            equipmentRequests.map((request) => request.equipmentItemId)
+          );
+
+        if (equipmentItemsError) {
+          notificationWarning =
+            "The booking was saved, but equipment names could not be loaded for the staff email.";
+        } else {
+          (equipmentItems ?? []).forEach((item) =>
+            equipmentNamesById.set(item.id, item.name)
+          );
+        }
+      }
+
+      if (!notificationWarning) {
+        const notificationResult = await sendBookingRequestNotification({
+          additionalNotes: values.additional_notes,
+          bookingId: booking.id,
+          courseClass: values.course_class,
+          description: values.description,
+          endsAt: values.ends_at,
+          equipment: equipmentRequests.map((request) => ({
+            name:
+              equipmentNamesById.get(request.equipmentItemId) ??
+              "Equipment item",
+            quantity: request.quantity
+          })),
+          roomName,
+          startsAt: values.starts_at,
+          studentEmail: values.student_email,
+          studentName: values.student_name
+        });
+
+        if (!notificationResult.ok && !notificationResult.skipped) {
+          notificationWarning =
+            "The booking was saved, but the staff notification email could not be sent.";
+        }
+      }
+    }
+
     revalidatePath("/dashboard");
 
-    return { ok: true, message: "Booking request submitted for approval." };
+    return {
+      ok: true,
+      message: notificationWarning
+        ? notificationWarning
+        : notificationMessage
+    };
   } catch (error) {
     return {
       ok: false,
@@ -528,397 +593,6 @@ export async function createBookingAction(
         error instanceof Error ? error.message : "Unable to create booking request."
     };
   }
-}
-
-export async function updateBookingAction(
-  formData: FormData
-): Promise<ActionResult> {
-  if (!hasSupabaseEnv()) {
-    return { ok: false, error: "Supabase environment variables are not configured." };
-  }
-
-  const supabase = await createClient();
-  const auth = await getCurrentProfile(supabase);
-
-  if ("error" in auth) {
-    return { ok: false, error: auth.error };
-  }
-
-  try {
-    const bookingId = getRequiredValue(formData, "booking_id");
-    const values = readBookingForm(formData);
-    values.room_id = await resolveRoomId({
-      roomName: getOptionalValue(formData, "room_name"),
-      roomValue: values.room_id,
-      supabase
-    });
-    const equipmentRequests = readEquipmentRequests(formData);
-    const conflictError = await ensureNoRoomConflict({
-      endsAt: new Date(values.ends_at),
-      excludeBookingId: bookingId,
-      roomId: values.room_id,
-      startsAt: new Date(values.starts_at),
-      supabase
-    });
-
-    if (conflictError) {
-      return { ok: false, error: conflictError };
-    }
-
-    const equipmentConflictError = await ensureEquipmentAvailable({
-      endsAt: new Date(values.ends_at),
-      excludeBookingId: bookingId,
-      requests: equipmentRequests,
-      startsAt: new Date(values.starts_at),
-      supabase
-    });
-
-    if (equipmentConflictError) {
-      return { ok: false, error: equipmentConflictError };
-    }
-
-    const { data, error } = await supabase
-      .from("bookings")
-      .update(values)
-      .eq("id", bookingId)
-      .eq("user_id", auth.user.id)
-      .eq("status", "pending_approval")
-      .select("id")
-      .maybeSingle();
-
-    if (error) {
-      return { ok: false, error: error.message };
-    }
-
-    if (!data) {
-      return { ok: false, error: "Only your pending requests can be edited." };
-    }
-
-    const { error: deleteEquipmentError } = await supabase
-      .from("booking_equipment")
-      .delete()
-      .eq("booking_id", bookingId);
-
-    if (deleteEquipmentError) {
-      return { ok: false, error: deleteEquipmentError.message };
-    }
-
-    if (equipmentRequests.length > 0) {
-      const { error: equipmentError } = await supabase
-        .from("booking_equipment")
-        .insert(
-          equipmentRequests.map((request) => ({
-            booking_id: bookingId,
-            equipment_item_id: request.equipmentItemId,
-            quantity: request.quantity,
-            status: "requested" as BookingEquipmentStatus
-          }))
-        );
-
-      if (equipmentError) {
-        return { ok: false, error: equipmentError.message };
-      }
-    }
-
-    revalidatePath("/dashboard");
-
-    return { ok: true, message: "Pending booking request updated." };
-  } catch (error) {
-    return {
-      ok: false,
-      error:
-        error instanceof Error ? error.message : "Unable to update booking request."
-    };
-  }
-}
-
-export async function cancelBookingAction(bookingId: string): Promise<ActionResult> {
-  if (!hasSupabaseEnv()) {
-    return { ok: false, error: "Supabase environment variables are not configured." };
-  }
-
-  const supabase = await createClient();
-  const auth = await getCurrentProfile(supabase);
-
-  if ("error" in auth) {
-    return { ok: false, error: auth.error };
-  }
-
-  const isStaff = isStaffRole(auth.profile.role);
-  let query = supabase
-    .from("bookings")
-    .update({
-      status: "cancelled",
-      reviewed_by: isStaff ? auth.user.id : null,
-      reviewed_at: isStaff ? new Date().toISOString() : null
-    })
-    .eq("id", bookingId);
-
-  if (!isStaff) {
-    query = query.eq("user_id", auth.user.id).eq("status", "pending_approval");
-  }
-
-  const { data, error } = await query.select("id").maybeSingle();
-
-  if (error) {
-    return { ok: false, error: error.message };
-  }
-
-  if (!data) {
-    return {
-      ok: false,
-      error: isStaff
-        ? "No cancellable booking was found."
-        : "Only your pending requests can be cancelled."
-    };
-  }
-
-  await supabase
-    .from("booking_equipment")
-    .update({ status: "cancelled" })
-    .eq("booking_id", bookingId);
-
-  revalidatePath("/dashboard");
-
-  return { ok: true, message: "Booking cancelled." };
-}
-
-export async function reviewBookingAction(
-  formData: FormData
-): Promise<ActionResult> {
-  if (!hasSupabaseEnv()) {
-    return { ok: false, error: "Supabase environment variables are not configured." };
-  }
-
-  const supabase = await createClient();
-  const auth = await getCurrentProfile(supabase);
-
-  if ("error" in auth) {
-    return { ok: false, error: auth.error };
-  }
-
-  if (!isStaffRole(auth.profile.role)) {
-    return { ok: false, error: "Only staff and admins can review bookings." };
-  }
-
-  const bookingId = getRequiredValue(formData, "booking_id");
-  const status = getRequiredValue(formData, "status") as BookingStatus;
-  const note = getOptionalValue(formData, "staff_note");
-
-  if (!["approved", "rejected", "cancelled"].includes(status)) {
-    return { ok: false, error: "Choose a valid review decision." };
-  }
-
-  const { data: booking, error: bookingError } = await supabase
-    .from("bookings")
-    .select("id,starts_at,ends_at")
-    .eq("id", bookingId)
-    .maybeSingle();
-
-  if (bookingError) {
-    return { ok: false, error: bookingError.message };
-  }
-
-  if (!booking) {
-    return { ok: false, error: "Booking request was not found." };
-  }
-
-  if (status === "approved") {
-    const reviewInputs = readEquipmentReviewInputs(formData);
-    const { data: equipmentRows, error: equipmentError } = await supabase
-      .from("booking_equipment")
-      .select("id,equipment_item_id,quantity,status")
-      .eq("booking_id", bookingId);
-
-    if (equipmentError) {
-      return { ok: false, error: equipmentError.message };
-    }
-
-    const plannedUpdates = (equipmentRows ?? []).map((row) => {
-      const input = reviewInputs.get(row.id);
-      const requestedQuantity = Number(row.quantity);
-      const adjustedQuantity =
-        input?.staffAdjustedQuantity === null ||
-        input?.staffAdjustedQuantity === undefined
-          ? requestedQuantity
-          : input.staffAdjustedQuantity;
-      const selectedStatus = input?.status ?? "approved";
-      const statusForRow: BookingEquipmentStatus =
-        selectedStatus === "rejected" || selectedStatus === "cancelled"
-          ? selectedStatus
-          : adjustedQuantity === requestedQuantity
-            ? "approved"
-            : "amended";
-
-      return {
-        id: row.id,
-        equipmentItemId: row.equipment_item_id,
-        quantity: Math.max(0, adjustedQuantity),
-        staffNotes: input?.staffNotes ?? null,
-        status: statusForRow
-      };
-    });
-
-    const reservingRequests = plannedUpdates
-      .filter((update) => ACTIVE_EQUIPMENT_STATUSES.includes(update.status))
-      .map((update) => ({
-        equipmentItemId: update.equipmentItemId,
-        quantity: update.quantity
-      }));
-
-    const equipmentConflictError = await ensureEquipmentAvailable({
-      endsAt: new Date(booking.ends_at),
-      excludeBookingId: bookingId,
-      requests: reservingRequests,
-      startsAt: new Date(booking.starts_at),
-      supabase
-    });
-
-    if (equipmentConflictError) {
-      return { ok: false, error: equipmentConflictError };
-    }
-
-    for (const update of plannedUpdates) {
-      if (ACTIVE_EQUIPMENT_STATUSES.includes(update.status) && update.quantity <= 0) {
-        return { ok: false, error: "Approved equipment quantities must be greater than zero." };
-      }
-
-      const { error: updateEquipmentError } = await supabase
-        .from("booking_equipment")
-        .update({
-          staff_adjusted_quantity:
-            update.status === "amended" ? update.quantity : null,
-          staff_notes: update.staffNotes,
-          status: update.status
-        })
-        .eq("id", update.id);
-
-      if (updateEquipmentError) {
-        return { ok: false, error: updateEquipmentError.message };
-      }
-    }
-  } else {
-    const equipmentStatus: BookingEquipmentStatus =
-      status === "cancelled" ? "cancelled" : "rejected";
-    const { error: updateEquipmentError } = await supabase
-      .from("booking_equipment")
-      .update({ status: equipmentStatus })
-      .eq("booking_id", bookingId);
-
-    if (updateEquipmentError) {
-      return { ok: false, error: updateEquipmentError.message };
-    }
-  }
-
-  const { data, error } = await supabase
-    .from("bookings")
-    .update({
-      status,
-      reviewed_by: auth.user.id,
-      reviewed_at: new Date().toISOString()
-    })
-    .eq("id", bookingId)
-    .select("id")
-    .maybeSingle();
-
-  if (error) {
-    return { ok: false, error: error.message };
-  }
-
-  if (!data) {
-    return { ok: false, error: "Booking request was not found." };
-  }
-
-  if (note) {
-    const { error: noteError } = await supabase.from("staff_notes").insert({
-      booking_id: bookingId,
-      staff_id: auth.user.id,
-      note
-    });
-
-    if (noteError) {
-      return { ok: false, error: noteError.message };
-    }
-  }
-
-  revalidatePath("/dashboard");
-
-  return { ok: true, message: `Booking ${status.replace("_", " ")}.` };
-}
-
-export async function addStaffNoteAction(
-  formData: FormData
-): Promise<ActionResult> {
-  if (!hasSupabaseEnv()) {
-    return { ok: false, error: "Supabase environment variables are not configured." };
-  }
-
-  const supabase = await createClient();
-  const auth = await getCurrentProfile(supabase);
-
-  if ("error" in auth) {
-    return { ok: false, error: auth.error };
-  }
-
-  if (!isStaffRole(auth.profile.role)) {
-    return { ok: false, error: "Only staff and admins can add staff notes." };
-  }
-
-  const { error } = await supabase.from("staff_notes").insert({
-    booking_id: getRequiredValue(formData, "booking_id"),
-    staff_id: auth.user.id,
-    note: getRequiredValue(formData, "staff_note")
-  });
-
-  if (error) {
-    return { ok: false, error: error.message };
-  }
-
-  revalidatePath("/dashboard");
-
-  return { ok: true, message: "Staff note added." };
-}
-
-export async function saveRoomAction(formData: FormData): Promise<ActionResult> {
-  if (!hasSupabaseEnv()) {
-    return { ok: false, error: "Supabase environment variables are not configured." };
-  }
-
-  const supabase = await createClient();
-  const auth = await getCurrentProfile(supabase);
-
-  if ("error" in auth) {
-    return { ok: false, error: auth.error };
-  }
-
-  if (auth.profile.role !== "admin") {
-    return { ok: false, error: "Only admins can manage rooms." };
-  }
-
-  const roomId = getOptionalValue(formData, "room_id");
-  const capacity = Number(getRequiredValue(formData, "capacity"));
-  const sortOrder = Number(getRequiredValue(formData, "sort_order"));
-  const values = {
-    name: getRequiredValue(formData, "name"),
-    location: getRequiredValue(formData, "location"),
-    description: getOptionalValue(formData, "description"),
-    capacity: Number.isFinite(capacity) ? capacity : 1,
-    color: getRequiredValue(formData, "color"),
-    is_active: formData.get("is_active") === "on",
-    sort_order: Number.isFinite(sortOrder) ? sortOrder : 0
-  };
-
-  const { error } = roomId
-    ? await supabase.from("rooms").update(values).eq("id", roomId)
-    : await supabase.from("rooms").insert(values);
-
-  if (error) {
-    return { ok: false, error: error.message };
-  }
-
-  revalidatePath("/dashboard");
-
-  return { ok: true, message: roomId ? "Room updated." : "Room created." };
 }
 
 export async function saveUserAction(formData: FormData): Promise<ActionResult> {
@@ -944,6 +618,26 @@ export async function saveUserAction(formData: FormData): Promise<ActionResult> 
     return { ok: false, error: "Choose a valid user role." };
   }
 
+  if (isStaffLevelRole(role)) {
+    const { data: userProfile, error: profileError } = await supabase
+      .from("profiles")
+      .select("email")
+      .eq("id", userId)
+      .maybeSingle();
+
+    if (profileError) {
+      return { ok: false, error: profileError.message };
+    }
+
+    if (!userProfile || !canUseStaffRole(userProfile.email)) {
+      return {
+        ok: false,
+        error:
+          "Only approved Fife College staff email addresses can be assigned staff or admin access."
+      };
+    }
+  }
+
   const { error } = await supabase
     .from("profiles")
     .update({
@@ -961,96 +655,4 @@ export async function saveUserAction(formData: FormData): Promise<ActionResult> 
   revalidatePath("/dashboard");
 
   return { ok: true, message: "User updated." };
-}
-
-export async function saveEquipmentCategoryAction(
-  formData: FormData
-): Promise<ActionResult> {
-  if (!hasSupabaseEnv()) {
-    return { ok: false, error: "Supabase environment variables are not configured." };
-  }
-
-  const supabase = await createClient();
-  const auth = await getCurrentProfile(supabase);
-
-  if ("error" in auth) {
-    return { ok: false, error: auth.error };
-  }
-
-  if (auth.profile.role !== "admin") {
-    return { ok: false, error: "Only admins can manage equipment categories." };
-  }
-
-  const categoryId = getOptionalValue(formData, "category_id");
-  const displayOrder = Number(getRequiredValue(formData, "display_order"));
-  const values = {
-    display_order: Number.isFinite(displayOrder) ? displayOrder : 0,
-    name: getRequiredValue(formData, "name")
-  };
-
-  const { error } = categoryId
-    ? await supabase
-        .from("equipment_categories")
-        .update(values)
-        .eq("id", categoryId)
-    : await supabase.from("equipment_categories").insert(values);
-
-  if (error) {
-    return { ok: false, error: error.message };
-  }
-
-  revalidatePath("/dashboard");
-
-  return {
-    ok: true,
-    message: categoryId ? "Equipment category updated." : "Equipment category added."
-  };
-}
-
-export async function saveEquipmentItemAction(
-  formData: FormData
-): Promise<ActionResult> {
-  if (!hasSupabaseEnv()) {
-    return { ok: false, error: "Supabase environment variables are not configured." };
-  }
-
-  const supabase = await createClient();
-  const auth = await getCurrentProfile(supabase);
-
-  if ("error" in auth) {
-    return { ok: false, error: auth.error };
-  }
-
-  if (auth.profile.role !== "admin") {
-    return { ok: false, error: "Only admins can manage equipment inventory." };
-  }
-
-  const equipmentItemId = getOptionalValue(formData, "equipment_item_id");
-  const totalQuantity = Number(getRequiredValue(formData, "total_quantity"));
-  const values = {
-    category_id: getRequiredValue(formData, "category_id"),
-    is_active: formData.get("is_active") === "on",
-    name: getRequiredValue(formData, "name"),
-    notes: getOptionalValue(formData, "notes"),
-    total_quantity:
-      Number.isInteger(totalQuantity) && totalQuantity >= 0 ? totalQuantity : 0
-  };
-
-  const { error } = equipmentItemId
-    ? await supabase
-        .from("equipment_items")
-        .update(values)
-        .eq("id", equipmentItemId)
-    : await supabase.from("equipment_items").insert(values);
-
-  if (error) {
-    return { ok: false, error: error.message };
-  }
-
-  revalidatePath("/dashboard");
-
-  return {
-    ok: true,
-    message: equipmentItemId ? "Equipment item updated." : "Equipment item added."
-  };
 }
