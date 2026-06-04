@@ -39,11 +39,11 @@ export default async function AuthPage({ searchParams }: AuthPageProps) {
             <div className="mb-8 inline-flex rounded-md bg-white p-3 shadow-soft">
               <Image
                 alt="Fife College"
-                className="h-auto w-40 object-contain"
-                height={72}
+                className="h-auto w-56 object-contain"
+                height={340}
                 priority
-                src="/branding/fife-college-logo.svg"
-                width={180}
+                src="/branding/fife-college-logo.png"
+                width={1122}
               />
             </div>
             <p className="text-sm font-bold uppercase text-sky">
