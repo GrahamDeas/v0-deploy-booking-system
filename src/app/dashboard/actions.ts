@@ -4,6 +4,7 @@ import { revalidatePath } from "next/cache";
 
 import { COURSE_CLASS_OPTIONS } from "@/lib/booking-options";
 import {
+  explainBookingNotificationError,
   hasBookingNotificationEmailConfig,
   sendBookingRequestNotification
 } from "@/lib/booking-notifications";
@@ -521,8 +522,9 @@ export async function createBookingAction(
         });
 
         if (!notificationResult.ok && !notificationResult.skipped) {
-          notificationWarning =
-            "The booking was saved, but the staff notification email could not be sent.";
+          notificationWarning = explainBookingNotificationError(
+            notificationResult.error
+          );
         }
       }
     }
