@@ -80,10 +80,6 @@ function getOptionalInteger(formData: FormData, key: string) {
   return Number.isInteger(parsed) ? parsed : null;
 }
 
-function isStaffRole(role: UserRole) {
-  return STAFF_ROLES.includes(role);
-}
-
 function parseLocalDateTime(date: string, time: string) {
   return new Date(`${date}T${time}:00`);
 }
@@ -411,37 +407,6 @@ async function ensureEquipmentAvailable({
   return null;
 }
 
-function readEquipmentReviewInputs(formData: FormData) {
-  const ids = formData
-    .getAll("booking_equipment_id")
-    .filter((value): value is string => typeof value === "string");
-  const inputs = new Map<string, EquipmentReviewInput>();
-
-  ids.forEach((id) => {
-    const rawStatus = formData.get(`equipment_status_${id}`);
-    const status =
-      typeof rawStatus === "string" &&
-      ACTIVE_EQUIPMENT_STATUSES.concat(["rejected", "cancelled"]).includes(
-        rawStatus as BookingEquipmentStatus
-      )
-        ? (rawStatus as BookingEquipmentStatus)
-        : "approved";
-    const staffAdjustedQuantity = getOptionalInteger(
-      formData,
-      `equipment_quantity_${id}`
-    );
-
-    inputs.set(id, {
-      id,
-      staffAdjustedQuantity,
-      staffNotes: getOptionalValue(formData, `equipment_staff_notes_${id}`),
-      status
-    });
-  });
-
-  return inputs;
-}
-
 export async function createBookingAction(
   formData: FormData
 ): Promise<ActionResult> {
@@ -656,3 +621,13 @@ export async function saveUserAction(formData: FormData): Promise<ActionResult> 
 
   return { ok: true, message: "User updated." };
 }
+
+export {
+  addStaffNoteAction,
+  cancelBookingAction,
+  reviewBookingAction,
+  saveEquipmentCategoryAction,
+  saveEquipmentItemAction,
+  saveRoomAction,
+  updateBookingAction
+} from "./action-extras";
