@@ -56,7 +56,11 @@ function getBookingNotificationRecipients() {
 }
 
 function getSmtpConfig(): SmtpConfig | null {
-  const user = (process.env.SMTP_USER || process.env.GMAIL_USER || "").trim();
+  const user = (
+    process.env.SMTP_USER ||
+    process.env.GMAIL_USER ||
+    "fifecollegemixingproject@gmail.com"
+  ).trim();
   const pass = process.env.SMTP_PASSWORD || process.env.GMAIL_APP_PASSWORD;
 
   if (!user || !pass) {
@@ -414,9 +418,7 @@ async function sendWithSmtp({
     };
   }
 
-  const from =
-    process.env.BOOKING_NOTIFICATION_FROM ||
-    `Studio Booking System <${smtp.user}>`;
+  const from = `Studio Booking System <${smtp.user}>`;
   const fromAddress = extractEmailAddress(from);
   const message = buildSmtpMessage({
     from,
