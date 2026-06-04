@@ -7,6 +7,7 @@ import { useRouter } from "next/navigation";
 import { COURSE_CLASS_OPTIONS, DEFAULT_COURSE_CLASS } from "@/lib/booking-options";
 import { createClient } from "@/lib/supabase/client";
 import { cn } from "@/lib/utils";
+import { isFifeEmail, normalizeEmail } from "@/lib/user-rules";
 
 type AuthMode = "sign-in" | "sign-up";
 
@@ -43,8 +44,15 @@ export function AuthForm({ isConfigured, next }: AuthFormProps) {
       const supabase = createClient();
 
       if (isSignUp) {
+        const normalizedEmail = normalizeEmail(email);
+
+        if (!isFifeEmail(normalizedEmail)) {
+          setError("Use your @fife.ac.uk email address to register.");
+          return;
+        }
+
         const { data, error: signUpError } = await supabase.auth.signUp({
-          email,
+          email: normalizedEmail,
           password,
           options: {
             emailRedirectTo: `${window.location.origin}/auth/callback?next=/dashboard`,
