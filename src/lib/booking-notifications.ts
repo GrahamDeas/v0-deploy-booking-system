@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import * as net from "node:net";
 import * as tls from "node:tls";
 
 import { formatDateTime } from "@/lib/utils";
@@ -35,12 +36,17 @@ type SmtpResponse = {
   text: string;
 };
 
+type SmtpSocket = net.Socket | tls.TLSSocket;
+
 const STAFF_BOOKING_NOTIFICATION_RECIPIENTS = [
   "grahamdeas@fife.ac.uk",
   "neilbethune@fife.ac.uk",
   "traviswhalley@fife.ac.uk",
   "billthaw@fife.ac.uk"
 ] as const;
+
+const DEFAULT_BOOKING_NOTIFICATION_SENDER =
+  "RecordingStudioBookings@fife.ac.uk";
 
 function getBookingNotificationRecipients() {
   const configuredRecipients = process.env.BOOKING_NOTIFICATION_RECIPIENTS;
@@ -59,7 +65,7 @@ function getSmtpConfig(): SmtpConfig | null {
   const user = (
     process.env.SMTP_USER ||
     process.env.GMAIL_USER ||
-    "fifecollegemixingproject@gmail.com"
+    DEFAULT_BOOKING_NOTIFICATION_SENDER
   ).trim();
   const pass = process.env.SMTP_PASSWORD || process.env.GMAIL_APP_PASSWORD;
 
@@ -67,12 +73,23 @@ function getSmtpConfig(): SmtpConfig | null {
     return null;
   }
 
-  const port = Number(process.env.SMTP_PORT || 465);
+  const defaultHost = user.toLowerCase().endsWith("@fife.ac.uk")
+    ? "smtp.office365.com"
+    : "smtp.gmail.com";
+  const host = (process.env.SMTP_HOST || defaultHost).trim();
+  const defaultPort = host.toLowerCase().includes("office365") ? 587 : 465;
+  const port = Number(process.env.SMTP_PORT || defaultPort);
+  const resolvedPort = Number.isFinite(port) ? port : defaultPort;
+  const defaultSecure =
+    !host.toLowerCase().includes("office365") && resolvedPort !== 587;
 
   return {
-    host: (process.env.SMTP_HOST || "smtp.gmail.com").trim(),
-    port: Number.isFinite(port) ? port : 465,
-    secure: (process.env.SMTP_SECURE || "true").toLowerCase() !== "false",
+    host,
+    port: resolvedPort,
+    secure:
+      process.env.SMTP_SECURE === undefined
+        ? defaultSecure
+        : process.env.SMTP_SECURE.toLowerCase() !== "false",
     user,
     pass: pass.replace(/[\s"']/g, "")
   };
@@ -156,7 +173,7 @@ function buildSmtpMessage({
   ].join("\r\n");
 }
 
-function openSmtpSocket(smtp: SmtpConfig) {
+function openSecureSmtpSocket(smtp: SmtpConfig) {
   return new Promise<tls.TLSSocket>((resolve, reject) => {
     const socket = tls.connect({
       host: smtp.host,
@@ -174,7 +191,45 @@ function openSmtpSocket(smtp: SmtpConfig) {
   });
 }
 
-function createSmtpReader(socket: tls.TLSSocket) {
+function openPlainSmtpSocket(smtp: SmtpConfig) {
+  return new Promise<net.Socket>((resolve, reject) => {
+    const socket = net.connect({
+      host: smtp.host,
+      port: smtp.port
+    });
+
+    socket.setTimeout(20_000);
+    socket.once("connect", () => resolve(socket));
+    socket.once("error", reject);
+    socket.once("timeout", () => {
+      socket.destroy();
+      reject(new Error("SMTP connection timed out."));
+    });
+  });
+}
+
+function upgradeSmtpSocketToTls(socket: net.Socket, smtp: SmtpConfig) {
+  socket.removeAllListeners("data");
+  socket.removeAllListeners("error");
+  socket.removeAllListeners("timeout");
+
+  return new Promise<tls.TLSSocket>((resolve, reject) => {
+    const secureSocket = tls.connect({
+      servername: smtp.host,
+      socket
+    });
+
+    secureSocket.setTimeout(20_000);
+    secureSocket.once("secureConnect", () => resolve(secureSocket));
+    secureSocket.once("error", reject);
+    secureSocket.once("timeout", () => {
+      secureSocket.destroy();
+      reject(new Error("SMTP STARTTLS connection timed out."));
+    });
+  });
+}
+
+function createSmtpReader(socket: SmtpSocket) {
   let buffer = "";
   let currentLines: string[] = [];
   const queuedResponses: SmtpResponse[] = [];
@@ -273,10 +328,56 @@ async function sendSmtpCommand({
   command: string;
   expectedCodes: number[];
   reader: ReturnType<typeof createSmtpReader>;
-  socket: tls.TLSSocket;
+  socket: SmtpSocket;
 }) {
   socket.write(`${command}\r\n`);
   await expectSmtpResponse(await reader.readResponse(), expectedCodes);
+}
+
+async function openPreparedSmtpConnection(smtp: SmtpConfig) {
+  if (smtp.secure) {
+    const socket = await openSecureSmtpSocket(smtp);
+    const reader = createSmtpReader(socket);
+
+    await expectSmtpResponse(await reader.readResponse(), [220]);
+    await sendSmtpCommand({
+      command: "EHLO studio-booking.local",
+      expectedCodes: [250],
+      reader,
+      socket
+    });
+
+    return { reader, socket };
+  }
+
+  const plainSocket = await openPlainSmtpSocket(smtp);
+  const plainReader = createSmtpReader(plainSocket);
+
+  await expectSmtpResponse(await plainReader.readResponse(), [220]);
+  await sendSmtpCommand({
+    command: "EHLO studio-booking.local",
+    expectedCodes: [250],
+    reader: plainReader,
+    socket: plainSocket
+  });
+  await sendSmtpCommand({
+    command: "STARTTLS",
+    expectedCodes: [220],
+    reader: plainReader,
+    socket: plainSocket
+  });
+
+  const socket = await upgradeSmtpSocketToTls(plainSocket, smtp);
+  const reader = createSmtpReader(socket);
+
+  await sendSmtpCommand({
+    command: "EHLO studio-booking.local",
+    expectedCodes: [250],
+    reader,
+    socket
+  });
+
+  return { reader, socket };
 }
 
 function escapeHtml(value: string) {
@@ -380,11 +481,13 @@ export function explainBookingNotificationError(error: string | undefined) {
   if (
     error.includes("Invalid login") ||
     error.includes("Username and Password not accepted") ||
-    error.includes("535-5.7.8")
+    error.includes("535-5.7.8") ||
+    error.includes("5.7.57") ||
+    error.includes("Client not authenticated")
   ) {
     return (
-      "The booking was saved, but Gmail rejected the notification email login. " +
-      "Create a new Gmail app password for fifecollegemixingproject@gmail.com, then update SMTP_PASSWORD in Vercel."
+      "The booking was saved, but the notification mailbox rejected the email login. " +
+      "Check the password for RecordingStudioBookings@fife.ac.uk and ask Fife IT to enable authenticated SMTP for that mailbox."
     );
   }
 
@@ -410,14 +513,6 @@ async function sendWithSmtp({
     return { ok: false, skipped: true };
   }
 
-  if (!smtp.secure) {
-    return {
-      ok: false,
-      skipped: false,
-      error: "Only secure SMTP over SSL is supported for Gmail notifications."
-    };
-  }
-
   const from = `Studio Booking System <${smtp.user}>`;
   const fromAddress = extractEmailAddress(from);
   const message = buildSmtpMessage({
@@ -430,17 +525,9 @@ async function sendWithSmtp({
   });
 
   try {
-    const socket = await openSmtpSocket(smtp);
-    const reader = createSmtpReader(socket);
+    const { reader, socket } = await openPreparedSmtpConnection(smtp);
 
     try {
-      await expectSmtpResponse(await reader.readResponse(), [220]);
-      await sendSmtpCommand({
-        command: "EHLO studio-booking.local",
-        expectedCodes: [250],
-        reader,
-        socket
-      });
       await sendSmtpCommand({
         command: "AUTH LOGIN",
         expectedCodes: [334],
@@ -494,7 +581,7 @@ async function sendWithSmtp({
       error:
         error instanceof Error
           ? error.message
-          : "Gmail rejected the notification email."
+          : "The notification mailbox rejected the email."
     };
   }
 
