@@ -74,7 +74,7 @@ function getSmtpConfig(): SmtpConfig | null {
     port: Number.isFinite(port) ? port : 465,
     secure: (process.env.SMTP_SECURE || "true").toLowerCase() !== "false",
     user,
-    pass: pass.replace(/\s+/g, "")
+    pass: pass.replace(/[\s"']/g, "")
   };
 }
 
@@ -384,7 +384,7 @@ export function explainBookingNotificationError(error: string | undefined) {
   ) {
     return (
       "The booking was saved, but Gmail rejected the notification email login. " +
-      "Check the Gmail account and app password in the Vercel environment variables."
+      "Create a new Gmail app password for fifecollegemixingproject@gmail.com, then update SMTP_PASSWORD in Vercel."
     );
   }
 
@@ -468,7 +468,7 @@ async function sendWithSmtp({
 
       for (const recipient of recipients) {
         await sendSmtpCommand({
-          command: `RCPT TO:<${extractEmailAddress(recipient)}>`,
+          command: `RCPT TO:<${extractEmailAddress(recipient)}>` ,
           expectedCodes: [250, 251],
           reader,
           socket
